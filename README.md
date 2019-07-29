@@ -32,7 +32,7 @@ For windows, we recommend downloading from OSGEO https://live.osgeo.org/en/downl
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE.md](https://github.com/tastatham/bristol_solar_project/LICENSE.md) file for details
+This project is licensed under the MIT License - see the [LICENSE.md](https://github.com/tastatham/bristol_solar_project/blob/master/LICENSE.md) file for details
 
 ## Credits
 [Ordnance Survey for OS Zoomstack Buildings](https://www.ordnancesurvey.co.uk/business-and-government/licensing/using-creating-data-with-os-products/os-opendata.html).
