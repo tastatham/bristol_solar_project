@@ -1,0 +1,6 @@
+"0","# Mosaic all rasters and export as tif
+mosaic_fn(in_rst=out_total_grids,
+          out_rst=here('data/output','bristol_out_total_grid.tif'))
+"
+"1","NULL
+"

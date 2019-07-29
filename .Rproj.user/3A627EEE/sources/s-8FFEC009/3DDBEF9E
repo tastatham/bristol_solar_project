@@ -1,0 +1,25 @@
+{
+    "collab_server" : "",
+    "contents" : "",
+    "created" : 1564431911140.000,
+    "dirty" : false,
+    "encoding" : "UTF-8",
+    "folds" : "",
+    "hash" : "0",
+    "id" : "3DDBEF9E",
+    "lastKnownWriteTime" : 1564432085,
+    "last_content_update" : 1564432085669,
+    "path" : "C:/Users/UKTAS002/Desktop/bristol_solar_project/rmd/solar_project.Rmd",
+    "project_path" : "rmd/solar_project.Rmd",
+    "properties" : {
+        "cursorPosition" : "248,0",
+        "scrollLine" : "236"
+    },
+    "read_only" : false,
+    "read_only_alternatives" : [
+    ],
+    "relative_order" : 1,
+    "source_on_save" : false,
+    "source_window" : "",
+    "type" : "r_markdown"
+}

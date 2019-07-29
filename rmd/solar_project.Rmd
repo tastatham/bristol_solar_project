@@ -1,0 +1,298 @@
+---
+title: "Calculating Solar Irridiance for Individual Buildings in Bristol,England using LiDAR"
+author: "Tom Statham"
+date: "24 February 2019"
+output: html_document
+---
+
+# Bristol Solar Project 
+
+This markdown shows how the Bristol Solar Team estimated solar irridiance of *each individual building in Bristol, using Open LidAR data from the UK Environment Agency. This was part of the Open Bristol hackathon event and forms the first part of the analysis. The second part is a seperate markdown, which evaluates the potential for PV installation at the building level to different Census levels.This takes into account geomdemographic and other sources of information (Lenka Hasova). We would like to iterate that this analysis was part of and in no means supported by any private organization in any way. A small stipend of £1,500 was given between 3 team members (Thomas Statham, Lenka Hasova and David Saunders) from Bristol City Council, to cover meetups and any any other resources to carry out the analysis. For example, the time taken to just run the refined code below is => 100 hours (Using 8 core CPU), which doesn't take into R&D etc.
+
+## Data 
+We initially downloaded the LiDAR from the [Defra Data Service Platform](https://environment.data.gov.uk/) but later uploaded this to Dropbox, so that users can simply download the necessary data without having to navigate through the website (no API available at the time of writing). Specifically, we downloaded the Digital Surface Model (each pixel or cell represents the height above ground) data at 1m spatial resolution, that covers the Bristol Census boundaries.
+
+* We used buildings from Ordance Survey (OS) Zoomstack and there was several reasons for this;
+1. OS Zoomstack is open data
+2. OS Zoomstack provides a more comprehensive and up to date inventory of buildings than from Census (released 2019 vs 2011)
+Nevertheless, there are some limitations. Buildings do not represent individual households and so the results of this anlaysis should be interpreted with care. For example, semi-detached buildings are represented as a single building. 
+4. This does not take distinguish between household, public and commercial buildings
+
+The buildings geojson file in this  repository was cropped to the Census boundaries and some fine tweaking. Buildings that overlapped the Census were retained if there was a higher proportion of the total area included within the boundary. The code for this is not provided as was done in PostGIS but can be easily reproduced. 
+
+
+## Recommendations 
+To run this code, please git clone this repository. This will contain the necessary directories/subdirectories to run the code without any path changes. We are using the here library, which simplifies path directories for reproducibility. Although the necessary packages will be downloaded below, the prerequiste is that you will need install R and SAGA. This is a open-source GIS and we recommend using [OSGEO](https://live.osgeo.org/en/download.html) to download it (For Windows/Mac only), as this also gives you the neccessary bindings to other Geospatial libraries (including GDAL).
+
+
+# 1.0 Load libraries (and install them if not already installed)
+
+```{r}
+# list packages required to install 
+packages <- c('curl','RCurl','parallel','pbmcapply',# None-spatial pkgs
+              'gdalUtils','RSAGA','sf','velox','raster') # Spatial pkgs
+
+# If packages are not installed, install them and then load them 
+load_pkg <- function(pkg){
+  new.pkg <- pkg[!(pkg %in% installed.packages()[, "Package"])]
+  if (length(new.pkg)) 
+    install.packages(new.pkg, dependencies = TRUE)
+sapply(pkg, require, character.only = TRUE)
+}
+
+# Apply function to list of required packages 
+load_pkg(packages)
+
+# Easy data paths and sharing
+library(here)
+# Show where the project folder is
+here()
+```
+
+# 2.0 Download & Unzip Environment Agency LiDAR DSM @1m spatial resolution from Dropbox
+
+```{r}
+# Define each Dropbox url for each tile - each are ~45mb
+dropbox_url <- list (
+  ST56ne <- 'https://www.dropbox.com/s/i7f89oqju0jfmrs/LIDAR-DSM-1M-ST56ne.zip?dl=1',
+  ST56nW <- 'https://www.dropbox.com/s/zb66idkoeiux7pi/LIDAR-DSM-1M-ST56nw.zip?dl=1',
+  ST57ne <- 'https://www.dropbox.com/s/8salencpesaz96d/LIDAR-DSM-1M-ST57ne.zip?dl=1',
+  ST57nw <- 'https://www.dropbox.com/s/9hl84buj1kvr46x/LIDAR-DSM-1M-ST57nw.zip?dl=1',
+  ST57se <- 'https://www.dropbox.com/s/hswibee8xj3tukm/LIDAR-DSM-1M-ST57se.zip?dl=1',
+  ST57sw <- 'https://www.dropbox.com/s/hy0ywklyazmlhq8/LIDAR-DSM-1M-ST57sw.zip?dl=1',
+  ST58se <- 'https://www.dropbox.com/s/wmz2ijk4sr2t61u/LIDAR-DSM-1M-ST58se.zip?dl=1',
+  ST58sw <- 'https://www.dropbox.com/s/7tdu9w4nx7aubj5/LIDAR-DSM-1M-ST58sw.zip?dl=1',
+  ST66nw <- 'https://www.dropbox.com/s/r6urk06qkzu29nh/LIDAR-DSM-1M-ST66nw.zip?dl=1',
+  ST67nw <- 'https://www.dropbox.com/s/898gfpyydgpdgb3/LIDAR-DSM-1M-ST67nw.zip?dl=1',
+  ST67sw <- 'https://www.dropbox.com/s/ixz2icn55yog7r9/LIDAR-DSM-1M-ST67sw.zip?dl=1'
+  )
+# Define list of EA tiles we need to download to cover Bristol
+tiles <- list('ST56ne',
+              'ST56nw',
+              'ST57ne',
+              'ST57nw',
+              'ST57se',
+              'ST57sw',
+              'ST58se',
+              'ST58sw',
+              'ST66nw',
+              'ST67nw',
+              'ST67sw')
+
+# Download each tile from dropbox to data/input folder 
+mapply(function(X,Y) {
+curl_download(url=X,destfile=here('data/input',paste0(Y,'.zip')),quiet=FALSE,mode='wb')
+}, X=dropbox_url, Y=tiles)
+
+# List all downloaded compressed files to unzip 
+files <- list.files(here('data/input'), full.names = TRUE, recursive = TRUE)
+# Iterate over each file and run unzip() on each zip and keep each folder seperately to output folder
+pbmclapply(files, mc.style = "ETA", mc.cores = 4, function(i) unzip(i, exdir=gsub("\\.zip$", "", i)))
+```
+  
+# 3.0 Mosaicing Rasters
+
+Each tile downloaded from the EA contains several small raster images that make up each tile. Therefore we must mosaic (or combine) each raster that makes up each tile. We are using the gdalUtils package, which is an R-bridge to GDAL. We selected this as the fastest R-package (to date) for Geospatial manipulation. We also convert the tif format to SAGA format (.sdat) in order to run the PISR function from SAGA afterwards. 
+
+```{r}
+# Define project coordinate system - British National Grid
+crs <- '+proj=tmerc +lat_0=49 +lon_0=-2 +k=0.9996012717 +x_0=400000 +y_0=-100000 +ellps=airy +datum=OSGB36 +units=m +no_defs'
+
+# Create list of tile folders  
+tile_folder <- list.dirs(here('data/input/'), recursive=FALSE)
+# List all rasters in each tile folder
+tiles_asc <- mapply(function(tiles) {
+  list.files(path=here('data/input',tiles), pattern='.asc$', recursive=TRUE)
+  }, tiles=tiles)
+
+# Create empty list for storing full file paths 
+asc_full_path <- list()
+# Concatenate tile folder and list of all asc files within the folder to create full paths
+for (i in 1:length(tile_folder)){
+  asc_full_path[[i]] <- paste0(tile_folder[[i]], '/', tiles_asc[[i]])
+}
+
+# Mosaic all rasters contained within each subdirectory 
+mosaic_fn <- function(in_rst, out_rst){
+  
+  # Create empty gdal VRT as temp file 
+  r1.vrt <- paste(tempfile(),".vrt",sep="")
+  # Add all raster images in list to VRT
+  gdalbuildvrt(gdalfile=c(unlist(in_rst)), a_srs=crs, output.vrt=r1.vrt)
+  # Combine all rasters within temp vrt 
+  gdalwarp(srcfile=r1.vrt, dstfile=out_rst,  multi=TRUE, overwrite=TRUE)
+}
+
+# Mosaic all rasters 
+mapply(function(asc,tile_names) {
+  mosaic_fn(in_rst=asc, # Define entire path of one of the rasters to mosaic  
+          out_rst=here('data/input',paste0(tile_names, '.tif')))
+},asc=asc_full_path, tile_names=tiles)
+
+# Convert all tifs to SAGA format for PISR function
+batch_gdal_translate(infiles=here('data/input'),
+                     outdir=here('data/input'), 
+                     of='SAGA', outsuffix ='.sdat',pattern='.tif$')
+```
+
+# 3.0 Calculate Solar irridiance for each raster tile 
+
+We use the Potential Incoming Solar Potential (PISR) function from SAGA to caclulate solar irridiance (KwH/m2 per year) for each tile. There are similar functions from other open-source software including r.sun() from GRASS but we found the PISR function is the easiest to setup (relative to GRASS) and makes use of multi-core processing for faster processing. We compared the output of other functions which give comparable results, so we are confident in these estimates. 
+
+```{r}
+# Give full path 
+saga_ls <- list.files(here('data/input/test'), pattern = '\\.sgrd$')
+# List SAGA files for PISR function
+saga_ls <- paste(normalizePath(here('data/input/test')),"\\", saga_ls, sep="")
+
+# Calculate solar irridiance per year for each tile 
+mapply(function(rst,tiles) {
+  # Create folders 
+  dir.create(here('data/output', tiles))
+  # Run SAGA PISR function 
+  rsaga.pisr2(in.dem = rst, 
+            out.total.grid= paste0(here('data/output', tiles,'out_total_grid.tif')),
+            unit='KWh/m2', 
+            latitude = 51.454514,
+            start.date = list(day = 01, month = 12, year = 2016),
+            end.date = list(day = 01, month = 12, year = 2016))
+}, rst=saga_ls, tiles=tiles)
+```
+
+# 4.0 Mosaic all calculated PISR rasters
+
+Now we must join or mosaic all calcualted out totals to give us a raster image of our area of interest. All grids must be in the same folder (all folder).
+
+```{r}
+# Create list of output folders  
+output_tiles_folder <- list.dirs(here('data/output/'), recursive=FALSE)
+# List all rasters in each tile folder
+output_tiles_asc <- mapply(function(tiles) {
+  list.files(path=here('data/output',tiles), pattern='.sdat$', recursive=TRUE)
+  }, tiles=tiles)
+
+# Combine full path with each raster
+out_total_grids <- paste0(output_tiles_folder,'/',output_tiles_asc)
+
+# Mosaic all rasters and export as tif
+mosaic_fn(in_rst=out_total_grids,
+          out_rst=here('data/output','bristol_out_total_grid.tif'))
+```
+
+# 5.0 Zonal Statistics -  Calculate solar potential at the building level (all values)
+
+To estimate solar irridance at the building level (sum of all raster cells intersecting buildings), we calculate zonal statistics using the Velox package. This is significantly faster than the commonly used Raster package, since it's written in C++. 
+
+
+We calculate three zonal statistics;
+1.0 Calculate all pixel values intersecting buildings total building values
+2.0 Calculate values => 2676 intersecting buildings (high irridiance)
+3.0 Calculate the area of high irridiance on buildings.
+
+## 5.1 Pre-processsing 
+
+One limitation to overcome in this analysis is the fact that we have areas with there is no LiDAR coverage for Bristol. We could simply omit all buildings which intersect (or overlap) cells (or pixels) with values of 0 (no data) but this is not appropriate. Removing any building that intersects a cells of 0 would remove too many buildings. This is because values of 0 do where there is building shade. 
+
+Instead, we kept buildings which have a higher proportion (=>0.75) that intersect cells with LiDAR data. We found 0.75 was a representative number because some buildings do have a lot of shade and dropping these would not appropriate.
+
+This is achieved by ;
+1. reclassifying the raster image using a binary response. Cells that are greater than 0 are given 1 (data) and values less than 0 remain 0 (no data). 
+2. We then calculate the proportion by simply calculating zonal statistics for each individual building by the mean of all 0s and 1s that overlap buildings. 
+
+### Reclassify raster 
+```{r}
+# Load raster
+rs <- raster(here('data/output', 'bristol_out_total_grid.tif'),crs=crs)
+# Get extent of raster - used for creating velox object later
+ex <- extent(rs)
+# Define rule for data => 2676 
+rule_2676 <- matrix(c(0,2675.999,0), ncol=3,byrow=TRUE)
+# Calculat high irridiance areas
+rs_high <- reclassify(rs,rule_2676)
+# Convert to velox object
+vx_high <- velox(rs_high,ex=ex,crs=crs)
+# Define binary rule
+rule_01 <- matrix(c(0,0,0, 
+                    0.001,4035.5,1), ncol=3,byrow=TRUE)
+# Apply rules to raster
+rs_data <- reclassify(rs,rule_01)
+# Reclasify as velox object
+vx_data <- velox(rs_data,ex=ex,crs=crs)
+```
+
+### Functions for zonal stats 
+```{r}
+# Crop buildings o raster to speed up zonal stats & calculate the mean of pixels that intersect individual buildings
+build_crop_mean <- function(rst, ply){
+	# Crop buildings first and then return a df with mean values 
+	cropped <- rst$crop(ply); rst$extract(ply, fun=mean, df=TRUE)
+}
+
+# Crop buildings to raster to speed up zonal stats & then calculate the sum of pixels that intersect individual buildings
+build_crop_sum <- function(rst, ply){
+	# Crop buildings first and then return a df with extracted values by the sum
+	cropped <- rst$crop(ply); rst$extract(ply, fun=sum, df=TRUE)
+}
+
+# Crop buildings to raster to speed up zonal stats and calculate the sum of PISR cells that overlap buildings - since we are dealing with 1m spatial resolution length=1 = area 1m2
+high_irrid_area <- function(rst, ply){
+	# Crop buildings first and then return a df with extracted values by the sum
+	q <- rst$crop(ply); rst$extract(ply, fun=function(x) length(unique(x)), df=TRUE)
+}
+```
+
+### Apply Zonal stats 
+
+1. Total Irridiance of buildings
+2. High irridiance areas sum >= 2676
+3. Area of high irridiance intersecting buildings
+
+```{r}
+# Load buildings as sf object 
+build <- st_read(here('data/input', 'brist_build_clipped.geojson'), stringsAsFactors=FALSE, crs=crs)
+
+# Calculate proportion of polygons where the raster is >= 0.75 by calculating the mean value of this new column within each polygon to subset buildings that have data 
+build_prop <- build_crop_mean(rst=vx_data, ply=build)
+# Join layers together
+build_prop <- cbind(build, build_prop$out)
+# Subset buildings with a proportion => 0.75
+build_prop <- build_prop[build_prop$build_prop.out >= 0.75, ]
+
+# 1.0 Calculate total solar irridiance at the building level 
+# Apply function to ggregate pixels to the building level   
+solar_ply <- build_crop_sum(rst=vx, ply=build_prop)
+# Join layers together
+build_pv <- cbind(build_prop, solar_ply$out)
+# Subset columns 
+build_pv <- build_pv[c(4,5)]
+# Add id column
+build_pv$id <- seq.int(nrow(build_pv))
+# Change column order
+build_pv <- build_pv[c(3,1,2)]
+# Change column name
+names(build_pv)[2] <- 'pv_kwhm2_year'
+
+# 2.0 Calculate high irridiance areas over - pixel values =>2676
+# Apply function to ggregate pixels to the building level   
+solar_ply2767 <- build_crop_sum(rst=vx_high, ply=build_pv)
+# Join layers together
+build_pv <- cbind(build_pv, solar_ply2767$out)
+# Change column name
+names(build_pv)[3] <- 'high_irrid_pv_kwhm2_year'
+
+# 3.0 Calculate area of high irridiance raster values  
+
+# Apply function to compiled PISR raster  
+solar_ply_high_areas <- high_irrid_area(rst=vx_high, ply=build_pv)
+# Join layers together
+build_pv <- cbind(build_pv, solar_ply_high_areas$out)
+# Change name
+names(build_pv)[4] <- 'high_irrid_area'
+
+# Export buildings as geopackage layer
+st_write(build_pv, dsn=here('data','solar_proj.gpkg'), layer='build_solar_calc', layer_options="OVERWRITE=YES")
+```
+
+## Going forward
+
+Going forward, we would like to refine this analysis further. Using GPU-accelerated processing, we could gain significant time-savings than using multi-core CPU processing, giving us the ability to scale up the analysis further. We are making use of readily available Geospatial algorithms that have been around for years to calcualte solar irridiance. These could be refined and/or simplified to provide more accurate and/or faster calculations 
